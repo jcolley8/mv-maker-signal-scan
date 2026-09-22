@@ -23,18 +23,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Pull any new delta files from the shared Google Drive folder.
-      # Skipped automatically until BOTH of these are set:
-      #   repo variable GDRIVE_FOLDER_ID   and   repo secret GDRIVE_API_KEY
-      # The folder must be shared "Anyone with the link - Viewer".
+      # Pulls new delta files from the shared Google Drive folder.
+      # Does nothing until BOTH are set: variable GDRIVE_FOLDER_ID, secret GDRIVE_API_KEY.
       - name: Fetch deltas from Drive
-        if: vars.GDRIVE_FOLDER_ID != '' && secrets.GDRIVE_API_KEY != ''
         env:
           KEY: ${{ secrets.GDRIVE_API_KEY }}
           FOLDER: ${{ vars.GDRIVE_FOLDER_ID }}
         run: |
           set -euo pipefail
           mkdir -p drive
+          if [ -z "${KEY:-}" ] || [ -z "${FOLDER:-}" ]; then
+            echo "Drive not configured yet - skipping fetch."
+            exit 0
+          fi
           curl -sS -G "https://www.googleapis.com/drive/v3/files" \
             --data-urlencode "q='${FOLDER}' in parents and trashed=false" \
             --data-urlencode "fields=files(id,name)" \
@@ -44,22 +45,33 @@ jobs:
       - name: Assemble and build
         run: |
           set -euo pipefail
+          mkdir -p drive
           cp signals.json base-signals.json
           python3 assemble.py drive base-signals.json signals.json
           python3 build_dashboard.py signals.json index.html
           rm -f base-signals.json
+          mkdir -p _site
+          cp index.html signals.json _site/
 
       - name: Commit updated corpus
         run: |
           git config user.name  "mv-maker-scan-bot"
           git config user.email "actions@github.com"
-          git add signals.json index.html drive/ || true
+          git add signals.json index.html drive/ 2>/dev/null || true
           git diff --staged --quiet || git commit -m "scan: assemble deltas and rebuild $(date -u +%F)"
-          git push || true
+          git push || echo "push skipped - check Settings > Actions > General > Workflow permissions"
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: '.'
+          path: '_site'
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
