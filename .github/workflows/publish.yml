@@ -1,1 +1,65 @@
+name: Assemble and publish MV Maker Signal Scan
 
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  schedule:
+    - cron: '0 17 * * *'     # 1:00 PM ET
+    - cron: '0 23 * * *'     # 7:00 PM ET
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pull any new delta files from the shared Google Drive folder.
+      # Skipped automatically until BOTH of these are set:
+      #   repo variable GDRIVE_FOLDER_ID   and   repo secret GDRIVE_API_KEY
+      # The folder must be shared "Anyone with the link - Viewer".
+      - name: Fetch deltas from Drive
+        if: vars.GDRIVE_FOLDER_ID != '' && secrets.GDRIVE_API_KEY != ''
+        env:
+          KEY: ${{ secrets.GDRIVE_API_KEY }}
+          FOLDER: ${{ vars.GDRIVE_FOLDER_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p drive
+          curl -sS -G "https://www.googleapis.com/drive/v3/files" \
+            --data-urlencode "q='${FOLDER}' in parents and trashed=false" \
+            --data-urlencode "fields=files(id,name)" \
+            --data-urlencode "key=${KEY}" -o /tmp/list.json
+          python3 fetch_deltas.py /tmp/list.json drive
+
+      - name: Assemble and build
+        run: |
+          set -euo pipefail
+          cp signals.json base-signals.json
+          python3 assemble.py drive base-signals.json signals.json
+          python3 build_dashboard.py signals.json index.html
+          rm -f base-signals.json
+
+      - name: Commit updated corpus
+        run: |
+          git config user.name  "mv-maker-scan-bot"
+          git config user.email "actions@github.com"
+          git add signals.json index.html drive/ || true
+          git diff --staged --quiet || git commit -m "scan: assemble deltas and rebuild $(date -u +%F)"
+          git push || true
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+      - id: deployment
+        uses: actions/deploy-pages@v4
